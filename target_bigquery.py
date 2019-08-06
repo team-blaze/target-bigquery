@@ -77,7 +77,8 @@ def define_schema(field, name):
         schema_type = "RECORD"
         schema_fields = tuple(build_schema(field))
     if schema_type == "array":
-        schema_type = field.get('items').get('type')
+        # TODO this is a hack instead we should use $ref
+        schema_type = field.get('items').get('type', 'string')
         schema_mode = "REPEATED"
         if schema_type == "object":
           schema_type = "RECORD"
