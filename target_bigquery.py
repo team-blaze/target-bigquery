@@ -177,9 +177,11 @@ def persist_lines_job(project_id, dataset_id, lines=None, truncate=False, valida
         load_config = LoadJobConfig()
         load_config.schema = SCHEMA
         load_config.source_format = SourceFormat.NEWLINE_DELIMITED_JSON
-        load_config.schema_update_options = [
-            SchemaUpdateOption.ALLOW_FIELD_ADDITION
-        ]
+
+        if not truncate:
+            load_config.schema_update_options = [
+                SchemaUpdateOption.ALLOW_FIELD_ADDITION
+            ]
 
         if truncate:
             load_config.write_disposition = WriteDisposition.WRITE_TRUNCATE
