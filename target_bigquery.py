@@ -19,7 +19,7 @@ from tempfile import TemporaryFile
 
 from google.cloud import bigquery
 from google.cloud.bigquery.job import SourceFormat
-from google.cloud.bigquery import Dataset, WriteDisposition
+from google.cloud.bigquery import Dataset, WriteDisposition, SchemaUpdateOption
 from google.cloud.bigquery import SchemaField
 from google.cloud.bigquery import LoadJobConfig
 from google.api_core import exceptions
@@ -173,9 +173,13 @@ def persist_lines_job(project_id, dataset_id, lines=None, truncate=False, valida
     for table in rows.keys():
         table_ref = bigquery_client.dataset(dataset_id).table(table)
         SCHEMA = build_schema(schemas[table])
+
         load_config = LoadJobConfig()
         load_config.schema = SCHEMA
         load_config.source_format = SourceFormat.NEWLINE_DELIMITED_JSON
+        load_config.schema_update_options = [
+            SchemaUpdateOption.ALLOW_FIELD_ADDITION
+        ]
 
         if truncate:
             load_config.write_disposition = WriteDisposition.WRITE_TRUNCATE
