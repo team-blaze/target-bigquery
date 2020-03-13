@@ -10,6 +10,8 @@ import threading
 import http.client
 import urllib
 import pkg_resources
+from datetime import datetime, timedelta
+from time import sleep
 
 from jsonschema import validate
 import singer
@@ -296,28 +298,12 @@ def persist_lines_stream(project_id, dataset_id, lines=None, validate_records=Tr
     return state
 
 
-def handle_bigquery_error(err, data={}):
-    # retryable = True
-    # for msg in err["errors"]:
-    #     if msg["reason"] not in RETRYABLE_ERROR_CODES:
-    #         retryable = False
-
-    # if retryable:
-    #     logger.warning(f"Recoverable BigQuery insert error: {err}", extra={"error": err})
-    #     raise RecoverableException(str(err))
-
-    # logger.warning(
-    #     f"Unrecoverable BigQuery insert error: {err}", extra={"error": err, "data": data}
-    # )
-    # raise UnrecoverableException(str(err))
-    pass
-
-
 def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=True):
     state = None
     schemas = {}
     key_properties = {}
     tables = {}
+    recreated_tables = {}
     rows = {}
     errors = {}
     failed_lines = []
@@ -325,6 +311,51 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
     bigquery_client = bigquery.Client(project=project_id)
     dataset_ref = bigquery_client.dataset(dataset_id)
     bigquery_client.create_dataset(Dataset(dataset_ref), exists_ok=True)
+
+    def write_rows_to_bigquery(streams, emit_state_after_write=False):
+        nonlocal failed_lines
+        for stream in streams:
+            if rows[stream]:
+                # By using `insert_rows_json` and passing generated `row_ids` we avoid duplication
+                ids = [
+                    "-".join(str(row[val]) for val in key_properties[stream])
+                    for row in rows[stream]
+                ]
+
+                # NOTE: as it turns out it takes BigQuery ~2 minutes to empty cache and acknowledge
+                # a new table schema, see: https://stackoverflow.com/a/25292028/21217
+                # So we allow a long retry period for recreated tables, short for incremental sync
+                max_run_time = datetime.now() + timedelta(
+                    seconds=300 if recreated_tables.get(stream) else 30
+                )
+                while max_run_time > datetime.now():
+                    # NOTE: This will fail if there are more than 10000 rows or the request size
+                    # exceeds 10MB, see: https://cloud.google.com/bigquery/quotas#streaming_inserts
+                    # TODO: we could break it up to multiple transactions if the list is too long
+                    errors[stream] = bigquery_client.insert_rows_json(
+                        tables[stream], rows[stream], row_ids=ids
+                    )
+
+                    if not errors[stream]:
+                        break
+
+                    sleep(5 if recreated_tables.get(stream) else 1)
+
+                if not errors[stream]:
+                    logger.info(f"Loaded {len(rows[stream])} row(s) into {tables[stream].path}")
+                else:
+                    failed_lines = failed_lines + rows[stream]
+                    logger.warning(
+                        f"Error loading row(s) into '{tables[stream].path}': {str(errors[stream])}",
+                        extra={"stream": stream},
+                    )
+                    del errors[stream]
+
+                recreated_tables.pop(stream, None)
+                rows[stream] = []
+
+        if emit_state_after_write:
+            emit_state(state)
 
     for line in lines:
         try:
@@ -352,10 +383,13 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
 
         elif isinstance(msg, singer.StateMessage):
             state = msg.value
-            # TODO: verify whether this stream name extraction method would always work
             full_stream = state.get("currently_syncing") or ""
             stream = full_stream.split("-")[-1]
             logger.debug(f"Setting state to: {state}", extra={"stream": stream})
+
+            # If we already have some rows to be written and get a new state we need to write first
+            if rows.get(stream):
+                write_rows_to_bigquery([stream], emit_state_after_write=True)
 
             # If stream in `bookmarks` doesn't have `replication_key_value` we assume this state is
             # a first one for a particular stream and recreate table.
@@ -379,6 +413,8 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                 logger.info(
                     f"Created table '{tables[stream]}' with schema: {tables[stream].schema}"
                 )
+                # Mark the recreated table so we know we need to retry if first attempts fail
+                recreated_tables[stream] = True
 
         elif isinstance(msg, singer.SchemaMessage):
             stream = msg.stream
@@ -403,37 +439,12 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
             raise Exception(f"Unrecognized message: {msg}")
             failed_lines.append(msg)
 
-    # TODO: This might fail if there are more than 10000 rows or the request size exceeds 10MB, see:
-    # https://cloud.google.com/bigquery/quotas#streaming_inserts
-    for stream in rows.keys():
-        if rows[stream]:
-            # By using `insert_rows_json` and passing `row_ids` we can avoid duplication
-            ids = [
-                "-".join(str(row[val]) for val in key_properties[stream]) for row in rows[stream]
-            ]
+    # We shouldn't have any rows left to write, but let's try just in case
+    write_rows_to_bigquery(rows.keys())
 
-            errors[stream] = bigquery_client.insert_rows_json(
-                tables[stream], rows[stream], row_ids=ids
-            )
-
-    # NOTE: as it turns out it takes BigQuery ~2 minutes to empty its caches and acknowledge a new
-    # table schema, see: https://stackoverflow.com/a/25292028/21217
-    # So it means that we'll see errors for a few tries of inserts afterwards, but by adding the
-    # rows to `failed_lines` we won't return state, see below
-    for stream in errors.keys():
-        if not errors[stream]:
-            logger.info(f"Loaded {len(rows[stream])} row(s) into {tables[stream].path}")
-        else:
-            failed_lines = failed_lines + rows[stream]
-            logger.warning(
-                f"Error while loading row(s) into '{tables[stream].path}': {str(errors[stream])}",
-            )
-
-    # TODO: also try writing failed_lines to special table in BigQuery
     if failed_lines:
         logger.warning(f"Failed lines: {str(failed_lines)}", extra={"failed_lines": failed_lines})
-        # NOTE: on error prevent state from being returned which means the tap will retry
-        return
+        # TODO: also write failed_lines to special table in BigQuery
 
     return state
 
