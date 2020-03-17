@@ -332,9 +332,18 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                     # NOTE: This will fail if there are more than 10000 rows or the request size
                     # exceeds 10MB, see: https://cloud.google.com/bigquery/quotas#streaming_inserts
                     # TODO: we could break it up to multiple transactions if the list is too long
-                    errors[stream] = bigquery_client.insert_rows_json(
-                        tables[stream], rows[stream], row_ids=ids
-                    )
+                    try:
+                        errors[stream] = bigquery_client.insert_rows_json(
+                            tables[stream], rows[stream], row_ids=ids
+                        )
+                    except Exception as e:
+                        # NOTE: only log for now to see what we get
+                        logger.warning(
+                            f"Error on insert_rows_json: {str(e)}", extra={"stream": stream},
+                        )
+
+                    # TODO: we could handle below by trying to insert half of the rows
+                    # google.api_core.exceptions.BadRequest: 400 POST https://bigquery.googleapis.com/bigquery/v2/projects/basis-janssen-test/datasets/sync_test/tables/module_state/insertAll: Request payload size exceeds the limit: 10485760 bytes.
 
                     if not errors[stream]:
                         break
@@ -402,6 +411,8 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                 and not tables[stream].schema == build_schema(schemas[stream])
             ):
                 # Delete table
+                # TODO: instead of deleting table maybe we could write to a temporary table and then
+                # replace after finishing parsing the last line?
                 table_ref = TableReference(dataset_ref, stream)
                 logger.info(f"Deleting table: {table_ref}")
                 bigquery_client.delete_table(table_ref)
