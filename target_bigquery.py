@@ -32,13 +32,6 @@ from google.cloud.bigquery.job import SourceFormat
 from google.cloud.bigquery.table import TableReference
 from google.api_core import exceptions
 
-try:
-    parser = argparse.ArgumentParser(parents=[tools.argparser])
-    parser.add_argument("-c", "--config", help="Config file", required=True)
-    flags = parser.parse_args()
-except ImportError:
-    flags = None
-
 logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
 logger = singer.get_logger()
 
@@ -48,6 +41,16 @@ SCOPES = [
 ]
 CLIENT_SECRET_FILE = "client_secret.json"
 APPLICATION_NAME = "Singer BigQuery Target"
+
+RETRYABLE_ERROR_CODES = [
+    "backendError",
+    "blocked",
+    "internalError",
+    "quotaExceeded",
+    "rateLimitExceeded",
+    "stopped",
+    "tableUnavailable",
+]
 
 StreamMeta = collections.namedtuple(
     "StreamMeta", ["schema", "key_properties", "bookmark_properties"]
@@ -309,8 +312,8 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
     failed_lines = []
 
     bigquery_client = bigquery.Client(project=project_id)
-    dataset_ref = bigquery_client.dataset(dataset_id)
-    bigquery_client.create_dataset(Dataset(dataset_ref), exists_ok=True)
+    dataset_ref = f"{project_id}.{dataset_id}"
+    bigquery_client.create_dataset(dataset_ref, exists_ok=True)
 
     def write_rows_to_bigquery(streams, emit_state_after_write=False):
         nonlocal failed_lines
@@ -331,19 +334,35 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                 while max_run_time > datetime.now():
                     # NOTE: This will fail if there are more than 10000 rows or the request size
                     # exceeds 10MB, see: https://cloud.google.com/bigquery/quotas#streaming_inserts
-                    # TODO: we could break it up to multiple transactions if the list is too long
                     try:
                         errors[stream] = bigquery_client.insert_rows_json(
                             tables[stream], rows[stream], row_ids=ids
                         )
                     except Exception as e:
-                        # NOTE: only log for now to see what we get
+                        error_string = str(e)
                         logger.warning(
-                            f"Error on insert_rows_json: {str(e)}", extra={"stream": stream},
+                            f"Error on insert_rows_json: {error_string}", extra={"stream": stream},
                         )
-
-                    # TODO: we could handle below by trying to insert half of the rows
-                    # google.api_core.exceptions.BadRequest: 400 POST https://bigquery.googleapis.com/bigquery/v2/projects/basis-janssen-test/datasets/sync_test/tables/module_state/insertAll: Request payload size exceeds the limit: 10485760 bytes.
+                        if (
+                            "payload size exceeds the limit" in error_string
+                            or "too many rows present" in error_string
+                        ):
+                            # Let's try inserting it in two halves
+                            number_of_rows = len(rows[stream])
+                            errors[stream] = bigquery_client.insert_rows_json(
+                                tables[stream],
+                                rows[stream][: number_of_rows // 2],
+                                row_ids=ids[: number_of_rows // 2],
+                            )
+                            errors[stream] + bigquery_client.insert_rows_json(
+                                tables[stream],
+                                rows[stream][number_of_rows // 2 :],
+                                row_ids=ids[number_of_rows // 2 :],
+                            )
+                        elif e.errors[0]["reason"] in RETRYABLE_ERROR_CODES:
+                            pass
+                        else:
+                            raise e
 
                     if not errors[stream]:
                         break
@@ -413,7 +432,7 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                 # Delete table
                 # TODO: instead of deleting table maybe we could write to a temporary table and then
                 # replace after finishing parsing the last line?
-                table_ref = TableReference(dataset_ref, stream)
+                table_ref = f"{dataset_ref}.{stream}"
                 logger.info(f"Deleting table: {table_ref}")
                 bigquery_client.delete_table(table_ref)
 
@@ -431,7 +450,7 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
             stream = msg.stream
             schemas[stream] = msg.schema
             key_properties[stream] = msg.key_properties
-            table_ref = TableReference(dataset_ref, stream)
+            table_ref = f"{dataset_ref}.{stream}"
             try:
                 tables[stream] = bigquery_client.get_table(table_ref)
             except api_core.exceptions.NotFound:
@@ -454,8 +473,13 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
     write_rows_to_bigquery(rows.keys())
 
     if failed_lines:
-        logger.warning(f"Failed lines: {str(failed_lines)}", extra={"failed_lines": failed_lines})
-        # TODO: also write failed_lines to special table in BigQuery
+        logger.warning(f"Number of failed lines: {len(failed_lines)}")
+        # TODO: maybe also write failed_lines to special table in BigQuery
+        try:
+            # NOTE: if we have too many failed lines we might not be able to write the log entry
+            logger.warning(f"Failed lines: {str(failed_lines)}")
+        except Exception:
+            pass
 
     return state
 
@@ -480,6 +504,13 @@ def collect():
 
 
 def main():
+    try:
+        parser = argparse.ArgumentParser(parents=[tools.argparser])
+        parser.add_argument("-c", "--config", help="Config file", required=True)
+        flags = parser.parse_args()
+    except ImportError:
+        flags = None
+
     with open(flags.config) as input:
         config = json.load(input)
 

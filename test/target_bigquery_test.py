@@ -1,6 +1,9 @@
 import os
+import json
 from random import choice
 from string import ascii_uppercase
+
+from target_bigquery import persist_lines_hybrid
 
 
 random_dataset_id = "target_bigquery_test_" + "".join(choice(ascii_uppercase) for i in range(12))
@@ -48,3 +51,112 @@ def test_hybrid_multiple_runs(setup_bigquery_and_config, check_bigquery, do_sync
     assert 'version": 1693427999999' in stdout[0]
     assert 'version": 1693429999888' in stdout[1]
     assert check_bigquery(bigquery_client, table, lambda data: len(data) == 15)
+
+
+random_dataset2_id = "target_bigquery_test_" + "".join(choice(ascii_uppercase) for i in range(12))
+
+
+def test_oversize_request_slicing(setup_bigquery_and_config, check_bigquery, do_sync):
+    project_id, bigquery_client, _ = setup_bigquery_and_config(random_dataset2_id)
+    table = f"{project_id}.{random_dataset2_id}.fruitimals"
+
+    lines = (
+        [
+            json.dumps(
+                {
+                    "type": "SCHEMA",
+                    "stream": "fruitimals",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": ["integer"],
+                                "minimum": -2147483648,
+                                "maximum": 2147483647,
+                            },
+                            "name": {"type": ["null", "string"]},
+                            "asset": {"type": ["null", "string"]},
+                        },
+                        "definitions": {
+                            "sdc_recursive_integer_array": {
+                                "type": ["null", "integer", "array"],
+                                "items": {"$ref": "#/definitions/sdc_recursive_integer_array"},
+                            },
+                            "sdc_recursive_number_array": {
+                                "type": ["null", "number", "array"],
+                                "items": {"$ref": "#/definitions/sdc_recursive_number_array"},
+                            },
+                            "sdc_recursive_string_array": {
+                                "type": ["null", "string", "array"],
+                                "items": {"$ref": "#/definitions/sdc_recursive_string_array"},
+                            },
+                            "sdc_recursive_boolean_array": {
+                                "type": ["null", "boolean", "array"],
+                                "items": {"$ref": "#/definitions/sdc_recursive_boolean_array"},
+                            },
+                            "sdc_recursive_timestamp_array": {
+                                "type": ["null", "string", "array"],
+                                "format": "date-time",
+                                "items": {"$ref": "#/definitions/sdc_recursive_timestamp_array"},
+                            },
+                            "sdc_recursive_object_array": {
+                                "type": ["null", "object", "array"],
+                                "items": {"$ref": "#/definitions/sdc_recursive_object_array"},
+                            },
+                        },
+                    },
+                    "key_properties": ["id"],
+                    "bookmark_properties": ["id"],
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "STATE",
+                    "value": {
+                        "bookmarks": {
+                            "database-public-fruitimals": {
+                                "last_replication_method": "INCREMENTAL",
+                                "replication_key": "id",
+                                "version": 1573504566181,
+                            }
+                        },
+                        "currently_syncing": "database-public-fruitimals",
+                    },
+                }
+            ),
+        ]
+        + [
+            json.dumps(
+                {
+                    "type": "RECORD",
+                    "stream": "fruitimals",
+                    "record": {"asset": "seeds", "id": x, "name": "Pear"},
+                    "version": 1573504566181,
+                    "time_extracted": "2020-03-06T14:22:46.181933Z",
+                }
+            )
+            for x in range(11000)
+        ]
+        + [
+            json.dumps(
+                {
+                    "type": "STATE",
+                    "value": {
+                        "bookmarks": {
+                            "database-public-fruitimals": {
+                                "last_replication_method": "INCREMENTAL",
+                                "replication_key": "id",
+                                "version": 1573504566181,
+                                "replication_key_value": 12,
+                            }
+                        },
+                        "currently_syncing": None,
+                    },
+                }
+            )
+        ]
+    )
+
+    persist_lines_hybrid(project_id, random_dataset2_id, lines=lines, validate_records=False)
+
+    assert check_bigquery(bigquery_client, table, lambda data: len(data) == 11000)
