@@ -42,6 +42,7 @@ SCOPES = [
 CLIENT_SECRET_FILE = "client_secret.json"
 APPLICATION_NAME = "Singer BigQuery Target"
 
+# Error reasons below from: https://cloud.google.com/bigquery/docs/error-messages#errortable
 RETRYABLE_ERROR_CODES = [
     "backendError",
     "blocked",
@@ -359,7 +360,11 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                                 rows[stream][number_of_rows // 2 :],
                                 row_ids=ids[number_of_rows // 2 :],
                             )
-                        elif e.errors[0]["reason"] in RETRYABLE_ERROR_CODES:
+                        elif (
+                            e.__module__ == "google.api_core.exceptions"
+                            and e.errors
+                            and e.errors[0].get("reason") in RETRYABLE_ERROR_CODES
+                        ):
                             pass
                         else:
                             raise e
