@@ -10,6 +10,7 @@ import threading
 import http.client
 import urllib
 import pkg_resources
+from decimal import Decimal
 from datetime import datetime, timedelta
 from time import sleep
 
@@ -29,7 +30,6 @@ from google.cloud.bigquery import (
     LoadJobConfig,
 )
 from google.cloud.bigquery.job import SourceFormat
-from google.cloud.bigquery.table import TableReference
 from google.api_core import exceptions
 
 logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
@@ -326,6 +326,13 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                     for row in rows[stream]
                 ]
 
+                # Singer uses Decimal in the deserialised data which `insert_rows_json` can't
+                # serialise with the built in `json` class so we need to fix it
+                fixed_rows = [
+                    {k: (float(v) if isinstance(v, Decimal) else v) for (k, v) in row.items()}
+                    for row in rows[stream]
+                ]
+
                 # NOTE: as it turns out it takes BigQuery ~2 minutes to empty cache and acknowledge
                 # a new table schema, see: https://stackoverflow.com/a/25292028/21217
                 # So we allow a long retry period for recreated tables, short for incremental sync
@@ -337,7 +344,7 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                     # exceeds 10MB, see: https://cloud.google.com/bigquery/quotas#streaming_inserts
                     try:
                         errors[stream] = bigquery_client.insert_rows_json(
-                            tables[stream], rows[stream], row_ids=ids
+                            tables[stream], fixed_rows, row_ids=ids
                         )
                     except Exception as e:
                         error_string = str(e)
@@ -349,22 +356,18 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                             or "too many rows present" in error_string
                         ):
                             # Let's try inserting it in two halves
-                            number_of_rows = len(rows[stream])
+                            number_of_rows = len(fixed_rows)
                             errors[stream] = bigquery_client.insert_rows_json(
                                 tables[stream],
-                                rows[stream][: number_of_rows // 2],
+                                fixed_rows[: number_of_rows // 2],
                                 row_ids=ids[: number_of_rows // 2],
                             )
                             errors[stream] + bigquery_client.insert_rows_json(
                                 tables[stream],
-                                rows[stream][number_of_rows // 2 :],
+                                fixed_rows[number_of_rows // 2 :],
                                 row_ids=ids[number_of_rows // 2 :],
                             )
-                        elif (
-                            e.__module__ == "google.api_core.exceptions"
-                            and e.errors
-                            and e.errors[0].get("reason") in RETRYABLE_ERROR_CODES
-                        ):
+                        elif getattr(e, "errors", [{}])[0].get("reason") in RETRYABLE_ERROR_CODES:
                             pass
                         else:
                             raise e

@@ -1,7 +1,8 @@
 import os
-import json
 from random import choice
 from string import ascii_uppercase
+import simplejson as json
+from decimal import Decimal
 
 from target_bigquery import persist_lines_hybrid
 
@@ -75,7 +76,7 @@ def test_oversize_request_slicing(setup_bigquery_and_config, check_bigquery, do_
                                 "maximum": 2147483647,
                             },
                             "name": {"type": ["null", "string"]},
-                            "asset": {"type": ["null", "string"]},
+                            "decimal": {"type": ["null", "number"]},
                         },
                         "definitions": {
                             "sdc_recursive_integer_array": {
@@ -130,7 +131,7 @@ def test_oversize_request_slicing(setup_bigquery_and_config, check_bigquery, do_
                 {
                     "type": "RECORD",
                     "stream": "fruitimals",
-                    "record": {"asset": "seeds", "id": x, "name": "Pear"},
+                    "record": {"decimal": Decimal(f"{x}.1"), "id": x, "name": "Pear"},
                     "version": 1573504566181,
                     "time_extracted": "2020-03-06T14:22:46.181933Z",
                 }

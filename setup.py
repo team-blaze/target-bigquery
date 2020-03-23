@@ -17,6 +17,7 @@ setup(
         "google-cloud>=0.34.0",
         "google-cloud-bigquery>=1.9.0",
         "oauth2client>=4.1.3",
+        "simplejson>=3.17.0",
     ],
     entry_points="""
           [console_scripts]
