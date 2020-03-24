@@ -302,7 +302,7 @@ def persist_lines_stream(project_id, dataset_id, lines=None, validate_records=Tr
     return state
 
 
-def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=True):
+def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=True, location=None):
     state = None
     schemas = {}
     key_properties = {}
@@ -314,7 +314,10 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
 
     bigquery_client = bigquery.Client(project=project_id)
     dataset_ref = f"{project_id}.{dataset_id}"
-    bigquery_client.create_dataset(dataset_ref, exists_ok=True)
+    dataset = bigquery.Dataset(dataset_ref)
+    if location:
+        dataset.location = location
+    bigquery_client.create_dataset(dataset, exists_ok=True)
 
     def write_rows_to_bigquery(streams, emit_state_after_write=False):
         nonlocal failed_lines
@@ -536,7 +539,11 @@ def main():
 
     if config.get("replication_method") == "HYBRID":
         state = persist_lines_hybrid(
-            config["project_id"], config["dataset_id"], input, validate_records=validate_records
+            config["project_id"],
+            config["dataset_id"],
+            input,
+            validate_records=validate_records,
+            location=config.get("location"),
         )
     elif config.get("stream_data", True):
         state = persist_lines_stream(
