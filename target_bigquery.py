@@ -3,7 +3,7 @@
 import argparse
 import io
 import sys
-import json
+import simplejson as json
 import logging
 import collections
 import threading
@@ -129,17 +129,9 @@ def build_schema(schema):
 def persist_lines_job(project_id, dataset_id, lines=None, truncate=False, validate_records=True):
     state = None
     schemas = {}
-    key_properties = {}
-    tables = {}
     rows = {}
-    errors = {}
 
     bigquery_client = bigquery.Client(project=project_id)
-
-    # try:
-    #     dataset = bigquery_client.create_dataset(Dataset(dataset_ref)) or Dataset(dataset_ref)
-    # except exceptions.Conflict:
-    #     pass
 
     for line in lines:
         try:
@@ -161,11 +153,8 @@ def persist_lines_job(project_id, dataset_id, lines=None, truncate=False, valida
             if validate_records:
                 validate(msg.record, schema)
 
-            # NEWLINE_DELIMITED_JSON expects literal JSON formatted data, with a newline character splitting each row.
-            dat = bytes(json.dumps(msg.record) + "\n", "UTF-8")
-
-            rows[msg.stream].write(dat)
-            # rows[msg.stream].write(bytes(str(msg.record) + '\n', 'UTF-8'))
+            # NEWLINE_DELIMITED_JSON expects JSON string data, with a newline splitting each row.
+            rows[msg.stream].write(bytes(json.dumps(msg.record) + "\n", "UTF-8"))
 
             state = None
 
@@ -176,14 +165,7 @@ def persist_lines_job(project_id, dataset_id, lines=None, truncate=False, valida
         elif isinstance(msg, singer.SchemaMessage):
             table = msg.stream
             schemas[table] = msg.schema
-            key_properties[table] = msg.key_properties
-            # tables[table] = bigquery.Table(dataset.table(table), schema=build_schema(schemas[table]))
             rows[table] = TemporaryFile(mode="w+b")
-            errors[table] = None
-            # try:
-            #     tables[table] = bigquery_client.create_table(tables[table])
-            # except exceptions.Conflict:
-            #     pass
 
         elif isinstance(msg, singer.ActivateVersionMessage):
             # This is experimental and won't be used yet
@@ -200,25 +182,27 @@ def persist_lines_job(project_id, dataset_id, lines=None, truncate=False, valida
         load_config.schema = SCHEMA
         load_config.source_format = SourceFormat.NEWLINE_DELIMITED_JSON
 
-        if not truncate:
-            load_config.schema_update_options = [SchemaUpdateOption.ALLOW_FIELD_ADDITION]
-
         if truncate:
             load_config.write_disposition = WriteDisposition.WRITE_TRUNCATE
+        else:
+            load_config.schema_update_options = [SchemaUpdateOption.ALLOW_FIELD_ADDITION]
 
-        rows[table].seek(0)
-        logger.info("loading {} to Bigquery.\n".format(table))
         load_job = bigquery_client.load_table_from_file(
-            rows[table], table_ref, job_config=load_config
+            rows[table], table_ref, job_config=load_config, rewind=True
         )
-        logger.info("loading job {}".format(load_job.job_id))
-        logger.info(load_job.result())
+        logger.info(
+            f"Loading '{table}' to BigQuery as job '{load_job.job_id}'", extra={"stream": table}
+        )
 
-    # for table in errors.keys():
-    #     if not errors[table]:
-    #         print('Loaded {} row(s) into {}:{}'.format(rows[table], dataset_id, table), tables[table].path)
-    #     else:
-    #         print('Errors:', errors[table], sep=" ")
+        try:
+            load_job.result()
+        except Exception as e:
+            logger.error(
+                f"Error on inserting to table '{table}': {str(e)}", extra={"stream": table}
+            )
+            return
+
+        logger.info(f"Loaded {load_job.output_rows} row(s) to '{table}'", extra={"stream": table})
 
     return state
 

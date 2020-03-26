@@ -62,7 +62,7 @@ def check_bigquery():
             if assertion(data):
                 return data
 
-            if retries > 3:
+            if retries > 5:
                 if exception_on_fail:
                     raise Exception("Assertion didn't pass with data in BigQuery: {}".format(data))
                 else:
@@ -70,7 +70,7 @@ def check_bigquery():
                 return False
 
             retries += 1
-            time.sleep(0.5)
+            time.sleep(2 ** retries)
 
     return make_check_bigquery
 

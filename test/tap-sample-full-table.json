@@ -5,7 +5,6 @@
 {"type": "RECORD", "stream": "fruitimals", "record": {"asset": "paws", "id": 7, "name": "Bear"}, "version": 1573504566181, "time_extracted": "2020-03-06T14:22:46.181933Z"}
 {"type": "RECORD", "stream": "fruitimals", "record": {"asset": "seeds", "id": 8, "name": "Apple"}, "version": 1573504566181, "time_extracted": "2020-03-06T14:22:46.181933Z"}
 {"type": "RECORD", "stream": "fruitimals", "record": {"asset": "paws", "id": 9, "name": "Badger"}, "version": 1573504566181, "time_extracted": "2020-03-06T14:22:46.181933Z"}
-{"type": "RECORD", "stream": "fruitimals", "record": {"asset": "paws", "id": 10, "name": "Racoon"}, "version": 1573504566181, "time_extracted": "2020-03-06T14:22:46.181933Z"}
 {"type": "RECORD", "stream": "fruitimals", "record": {"asset": "pips", "id": 11, "name": "Orange"}, "version": 1573504566181, "time_extracted": "2020-03-06T14:22:46.181933Z"}
 {"type": "RECORD", "stream": "fruitimals", "record": {"asset": "paws", "id": 12, "name": "Lynx"}, "version": 1573504566181, "time_extracted": "2020-03-06T14:22:46.181933Z"}
 {"type": "STATE", "value": {"bookmarks": {"database-public-fruitimals": {"last_replication_method": "FULL_TABLE", "version": 1573504566181, "xmin": null}}, "currently_syncing": null}}
