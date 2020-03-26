@@ -1,19 +1,16 @@
 import os
-from random import choice
-from string import ascii_uppercase
 import simplejson as json
 from decimal import Decimal
 
 from target_bigquery import persist_lines_hybrid
 
 
-random_dataset_id = "target_bigquery_test_" + "".join(choice(ascii_uppercase) for i in range(12))
 test_path = os.path.dirname(os.path.realpath(__file__))
 
 
 def test_hybrid_multiple_runs(setup_bigquery_and_config, check_bigquery, do_sync):
-    project_id, bigquery_client, config_filename = setup_bigquery_and_config(random_dataset_id)
-    table = f"{project_id}.{random_dataset_id}.fruitimals"
+    project_id, bigquery_client, config_filename, dataset_id = setup_bigquery_and_config()
+    table = f"{project_id}.{dataset_id}.fruitimals"
 
     # This is the beginning of a stream, setting up a new table and populating with several rows
     stdout = do_sync(f"{test_path}/tap-sample-first-run.json", config_filename)
@@ -54,12 +51,9 @@ def test_hybrid_multiple_runs(setup_bigquery_and_config, check_bigquery, do_sync
     assert check_bigquery(bigquery_client, table, lambda data: len(data) == 15)
 
 
-random_dataset2_id = "target_bigquery_test_" + "".join(choice(ascii_uppercase) for i in range(12))
-
-
 def test_oversize_request_slicing(setup_bigquery_and_config, check_bigquery, do_sync):
-    project_id, bigquery_client, _ = setup_bigquery_and_config(random_dataset2_id)
-    table = f"{project_id}.{random_dataset2_id}.fruitimals"
+    project_id, bigquery_client, _, dataset_id = setup_bigquery_and_config()
+    table = f"{project_id}.{dataset_id}.fruitimals"
 
     lines = (
         [
@@ -158,6 +152,18 @@ def test_oversize_request_slicing(setup_bigquery_and_config, check_bigquery, do_
         ]
     )
 
-    persist_lines_hybrid(project_id, random_dataset2_id, lines=lines, validate_records=False)
+    persist_lines_hybrid(project_id, dataset_id, lines=lines, validate_records=False)
 
     assert check_bigquery(bigquery_client, table, lambda data: len(data) == 11000)
+
+
+def test_full_table(setup_bigquery_and_config, check_bigquery, do_sync):
+    project_id, bigquery_client, config_filename, dataset_id = setup_bigquery_and_config(
+        replication_method="FULL_TABLE"
+    )
+    table = f"{project_id}.{dataset_id}.fruitimals"
+
+    stdout = do_sync(f"{test_path}/tap-sample-full-table.json", config_filename)
+
+    assert 'version": 1573504566181' in stdout[0]
+    assert check_bigquery(bigquery_client, table, lambda data: len(data) == 7)

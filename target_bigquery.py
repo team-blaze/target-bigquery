@@ -88,6 +88,7 @@ def define_schema(field, name):
         schema_type = field["type"][-1]
     else:
         schema_type = field["type"]
+
     if schema_type == "object":
         schema_type = "RECORD"
         schema_fields = tuple(build_schema(field))

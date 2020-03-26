@@ -4,6 +4,8 @@ import pytest
 import time
 import subprocess
 import logging
+from random import choice
+from string import ascii_uppercase
 from google.cloud import bigquery
 from google.auth import default as get_credentials
 
@@ -18,8 +20,9 @@ def setup_bigquery_and_config():
     config_files = []
 
     def setup(
-        dataset_id, validate_records=False, stream_data=False, replication_method="HYBRID",
+        validate_records=False, stream_data=False, replication_method="HYBRID",
     ):
+        dataset_id = "target_bigquery_test_" + "".join(choice(ascii_uppercase) for i in range(12))
         target_config = {
             "project_id": project_id,
             "dataset_id": dataset_id,
@@ -34,7 +37,7 @@ def setup_bigquery_and_config():
             f.write(json.dumps(target_config))
 
         datasets.append(bigquery_client.create_dataset(dataset_id))
-        return project_id, bigquery_client, config_filename
+        return project_id, bigquery_client, config_filename, dataset_id
 
     yield setup
 
