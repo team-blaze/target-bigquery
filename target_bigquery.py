@@ -407,6 +407,7 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
 
         elif isinstance(msg, singer.StateMessage):
             state = msg.value
+            # We'll either get a stream name here or we need to have an empty string instead of None
             full_stream = state.get("currently_syncing") or ""
             stream = full_stream.split("-")[-1]
             logger.debug(f"Setting state to: {state}", extra={"stream": stream})
@@ -426,10 +427,8 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                 and not tables[stream].schema == build_schema(schemas[stream])
             ):
                 # Delete table
-                # TODO: instead of deleting table maybe we could write to a temporary table and then
-                # replace after finishing parsing the last line?
                 table_ref = f"{dataset_ref}.{stream}"
-                logger.info(f"Deleting table: {table_ref}")
+                logger.info(f"Deleting table: {table_ref}", extra={"stream": stream})
                 bigquery_client.delete_table(table_ref)
 
                 # Recreate table
@@ -437,9 +436,11 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                     bigquery.Table(table_ref, schema=build_schema(schemas[stream]))
                 )
                 logger.info(
-                    f"Created table '{tables[stream]}' with schema: {tables[stream].schema}"
+                    f"Created table '{tables[stream]}' with schema: {tables[stream].schema}",
+                    extra={"stream": stream},
                 )
-                # Mark the recreated table so we know we need to retry if first attempts fail
+
+                # Mark the table recreated so we know we need to retry if first attempts fail
                 recreated_tables[stream] = True
 
         elif isinstance(msg, singer.SchemaMessage):
