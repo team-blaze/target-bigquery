@@ -412,36 +412,39 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
             stream = full_stream.split("-")[-1]
             logger.debug(f"Setting state to: {state}", extra={"stream": stream})
 
-            # If we already have some rows to be written and get a new state we need to write first
+            # If we already have some rows to be written and get a new state we need to write
             if rows.get(stream):
                 write_rows_to_bigquery([stream], emit_state_after_write=True)
+
+            # TODO: this is commented out for now, we'll need to imlement another bit which tries to
+            # update the table schema first and only delete and recreate if that fails
 
             # If stream in `bookmarks` doesn't have `replication_key_value` we assume this state is
             # a first one for a particular stream and recreate table.
             # See: https://github.com/singer-io/tap-mysql#incremental
-            rep_key = state.get("bookmarks", {}).get(full_stream, {}).get("replication_key_value")
-            # NOTE: this will only work if `SchemaMessage` already received before
-            if (
-                stream
-                and not rep_key
-                and not tables[stream].schema == build_schema(schemas[stream])
-            ):
-                # Delete table
-                table_ref = f"{dataset_ref}.{stream}"
-                logger.info(f"Deleting table: {table_ref}", extra={"stream": stream})
-                bigquery_client.delete_table(table_ref)
+            # rep_key = state.get("bookmarks", {}).get(full_stream, {}).get("replication_key_value")
+            # # NOTE: this will only work if `SchemaMessage` already received before
+            # if (
+            #     stream
+            #     and not rep_key
+            #     and not tables[stream].schema == build_schema(schemas[stream])
+            # ):
+            #     # Delete table
+            #     table_ref = f"{dataset_ref}.{stream}"
+            #     logger.info(f"Deleting table: {table_ref}", extra={"stream": stream})
+            #     bigquery_client.delete_table(table_ref)
 
-                # Recreate table
-                tables[stream] = bigquery_client.create_table(
-                    bigquery.Table(table_ref, schema=build_schema(schemas[stream]))
-                )
-                logger.info(
-                    f"Created table '{tables[stream]}' with schema: {tables[stream].schema}",
-                    extra={"stream": stream},
-                )
+            #     # Recreate table
+            #     tables[stream] = bigquery_client.create_table(
+            #         bigquery.Table(table_ref, schema=build_schema(schemas[stream]))
+            #     )
+            #     logger.info(
+            #         f"Created table '{tables[stream]}' with schema: {tables[stream].schema}",
+            #         extra={"stream": stream},
+            #     )
 
-                # Mark the table recreated so we know we need to retry if first attempts fail
-                recreated_tables[stream] = True
+            #     # Mark the table recreated so we know we need to retry if first attempts fail
+            #     recreated_tables[stream] = True
 
         elif isinstance(msg, singer.SchemaMessage):
             stream = msg.stream
@@ -463,7 +466,7 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
             pass
 
         else:
-            raise Exception(f"Unrecognized message: {msg}")
+            logger.warning(f"Unrecognized message: {msg}")
             failed_lines.append(msg)
 
     # We shouldn't have any rows left to write, but let's try just in case
@@ -477,6 +480,8 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
             logger.warning(f"Failed lines: {str(failed_lines)}")
         except Exception:
             pass
+
+    bigquery_client.close()
 
     return state
 
