@@ -2,6 +2,7 @@ import os
 import json
 import pytest
 import time
+from datetime import datetime
 import subprocess
 import logging
 from random import choice
@@ -62,7 +63,7 @@ def check_bigquery():
             if assertion(data):
                 return data
 
-            if retries > 5:
+            if retries > 4:
                 if exception_on_fail:
                     raise Exception("Assertion didn't pass with data in BigQuery: {}".format(data))
                 else:
@@ -84,14 +85,24 @@ def do_sync():
             ("python", "target_bigquery.py", "-c", config_filename),
             stdin=tap_sample_ps.stdout,
             stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
 
-        lines = []
+        stdout_lines = []
         with target_ps.stdout as pipe:
             for line in iter(pipe.readline, b""):
-                print(line)
-                lines.append(str(line))
+                decoded_line = line.decode("utf-8").rstrip()
+                print(f"\033[95mSTDOUT - {datetime.now()} | {decoded_line}\033[0m")
+                stdout_lines.append(decoded_line)
+
+        stderr_lines = []
+        with target_ps.stderr as pipe:
+            for line in iter(pipe.readline, b""):
+                decoded_line = line.decode("utf-8").rstrip()
+                print(f"\033[94mSTDERR - {datetime.now()} | {decoded_line}\033[0m")
+                stderr_lines.append(decoded_line)
+
         target_ps.wait()
-        return lines
+        return stdout_lines, stderr_lines
 
     return make_do_sync

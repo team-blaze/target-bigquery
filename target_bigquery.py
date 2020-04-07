@@ -70,7 +70,7 @@ def clear_dict_hook(items):
     return {k: v if v is not None else "" for k, v in items}
 
 
-def define_schema(field, name):
+def define_schema(field, name, ignore_required=False):
     schema_name = name
     schema_type = "STRING"
     schema_mode = "NULLABLE"
@@ -83,7 +83,7 @@ def define_schema(field, name):
                 field = types
 
     if isinstance(field["type"], list):
-        if field["type"][0] != "null":
+        if field["type"][0] != "null" and not ignore_required:
             schema_mode = "REQUIRED"
         schema_type = field["type"][-1]
     else:
@@ -91,7 +91,7 @@ def define_schema(field, name):
 
     if schema_type == "object":
         schema_type = "RECORD"
-        schema_fields = tuple(build_schema(field))
+        schema_fields = tuple(build_schema(field, ignore_required=ignore_required))
     if schema_type == "array":
         # TODO this is a hack instead we should use $ref
         schema_type = field.get("items").get("type", "string")
@@ -101,7 +101,7 @@ def define_schema(field, name):
         schema_mode = "REPEATED"
         if schema_type == "object":
             schema_type = "RECORD"
-            schema_fields = tuple(build_schema(field.get("items")))
+            schema_fields = tuple(build_schema(field.get("items"), ignore_required=ignore_required))
 
     if schema_type == "string":
         if "format" in field:
@@ -114,16 +114,20 @@ def define_schema(field, name):
     return (schema_name, schema_type, schema_mode, schema_description, schema_fields)
 
 
-def build_schema(schema):
-    SCHEMA = []
+def build_schema(schema, ignore_required=False):
+    bigquery_schema = []
     for key in schema["properties"].keys():
         if not (bool(schema["properties"][key])):
             # if we endup with an empty record.
             continue
 
-        SCHEMA.append(SchemaField(*define_schema(schema["properties"][key], key)))
+        bigquery_schema.append(
+            SchemaField(
+                *define_schema(schema["properties"][key], key, ignore_required=ignore_required)
+            )
+        )
 
-    return SCHEMA
+    return bigquery_schema
 
 
 def persist_lines_job(project_id, dataset_id, lines=None, truncate=False, validate_records=True):
@@ -287,12 +291,14 @@ def persist_lines_stream(project_id, dataset_id, lines=None, validate_records=Tr
     return state
 
 
-def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=True, location=None):
+def persist_lines_hybrid(
+    project_id, dataset_id, lines=None, validate_records=True, location=None, can_delete_table=False
+):
     state = None
     schemas = {}
     key_properties = {}
     tables = {}
-    recreated_tables = {}
+    updated_tables = {}
     rows = {}
     errors = {}
     failed_lines = []
@@ -325,7 +331,7 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                 # a new table schema, see: https://stackoverflow.com/a/25292028/21217
                 # So we allow a long retry period for recreated tables, short for incremental sync
                 max_run_time = datetime.now() + timedelta(
-                    seconds=300 if recreated_tables.get(stream) else 30
+                    seconds=300 if updated_tables.get(stream) else 30
                 )
                 while max_run_time > datetime.now():
                     # NOTE: This will fail if there are more than 10000 rows or the request size
@@ -339,11 +345,8 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                         logger.warning(
                             f"Error on insert_rows_json: {error_string}", extra={"stream": stream},
                         )
-                        if (
-                            "payload size exceeds the limit" in error_string
-                            or "too many rows present" in error_string
-                        ):
-                            # Let's try inserting it in two halves
+
+                        def insert_in_halves():
                             number_of_rows = len(fixed_rows)
                             errors[stream] = bigquery_client.insert_rows_json(
                                 tables[stream],
@@ -355,7 +358,21 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                                 fixed_rows[number_of_rows // 2 :],
                                 row_ids=ids[number_of_rows // 2 :],
                             )
-                        elif getattr(e, "errors", [{}])[0].get("reason") in RETRYABLE_ERROR_CODES:
+
+                        google_sdk_errors = getattr(e, "errors", [])
+                        if (
+                            "payload size exceeds the limit" in error_string
+                            or "too many rows present" in error_string
+                        ):
+                            insert_in_halves()
+                        # While this is similar to the above, we want to avoid doing the json.dumps
+                        # if possible, so will only do it if we didn't get the expected errors
+                        elif len(json.dumps(fixed_rows)) > 9000000:
+                            insert_in_halves()
+                        elif (
+                            google_sdk_errors
+                            and google_sdk_errors[0].get("reason") in RETRYABLE_ERROR_CODES
+                        ):
                             pass
                         else:
                             raise e
@@ -363,23 +380,22 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
                     if not errors[stream]:
                         break
 
-                    sleep(5 if recreated_tables.get(stream) else 1)
+                    sleep(5 if updated_tables.get(stream) else 1)
 
                 if not errors[stream]:
                     logger.info(f"Loaded {len(rows[stream])} row(s) into {tables[stream].path}")
+                    if emit_state_after_write:
+                        emit_state(state)
                 else:
                     failed_lines = failed_lines + rows[stream]
-                    logger.warning(
+                    logger.error(
                         f"Error loading row(s) into '{tables[stream].path}': {str(errors[stream])}",
                         extra={"stream": stream},
                     )
                     del errors[stream]
 
-                recreated_tables.pop(stream, None)
+                updated_tables.pop(stream, None)
                 rows[stream] = []
-
-        if emit_state_after_write:
-            emit_state(state)
 
     for line in lines:
         try:
@@ -416,35 +432,76 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
             if rows.get(stream):
                 write_rows_to_bigquery([stream], emit_state_after_write=True)
 
-            # TODO: this is commented out for now, we'll need to imlement another bit which tries to
-            # update the table schema first and only delete and recreate if that fails
-
             # If stream in `bookmarks` doesn't have `replication_key_value` we assume this state is
             # a first one for a particular stream and recreate table.
             # See: https://github.com/singer-io/tap-mysql#incremental
-            # rep_key = state.get("bookmarks", {}).get(full_stream, {}).get("replication_key_value")
-            # # NOTE: this will only work if `SchemaMessage` already received before
-            # if (
-            #     stream
-            #     and not rep_key
-            #     and not tables[stream].schema == build_schema(schemas[stream])
-            # ):
-            #     # Delete table
-            #     table_ref = f"{dataset_ref}.{stream}"
-            #     logger.info(f"Deleting table: {table_ref}", extra={"stream": stream})
-            #     bigquery_client.delete_table(table_ref)
+            rep_key = state.get("bookmarks", {}).get(full_stream, {}).get("replication_key_value")
+            # NOTE: this will only work if `SchemaMessage` already received before
+            if (
+                stream
+                and not rep_key
+                and not tables[stream].schema == build_schema(schemas[stream], ignore_required=True)
+            ):
+                table_ref = f"{dataset_ref}.{stream}"
 
-            #     # Recreate table
-            #     tables[stream] = bigquery_client.create_table(
-            #         bigquery.Table(table_ref, schema=build_schema(schemas[stream]))
-            #     )
-            #     logger.info(
-            #         f"Created table '{tables[stream]}' with schema: {tables[stream].schema}",
-            #         extra={"stream": stream},
-            #     )
+                max_run_time = datetime.now() + timedelta(seconds=300)
+                while max_run_time > datetime.now():
+                    # First let's try to update the schema in the existing table
+                    try:
+                        logger.info(f"Updating table schema: {table_ref}", extra={"stream": stream})
+                        tables[stream] = bigquery_client.update_table(
+                            bigquery.Table(
+                                table_ref,
+                                schema=build_schema(schemas[stream], ignore_required=True),
+                            ),
+                            ["schema"],
+                        )
+                        logger.info(
+                            f"Updated table '{tables[stream]}' schema: {tables[stream].schema}",
+                            extra={"stream": stream},
+                        )
 
-            #     # Mark the table recreated so we know we need to retry if first attempts fail
-            #     recreated_tables[stream] = True
+                        # Mark the table updated so we know we need to retry inserting rows
+                        updated_tables[stream] = True
+                        break
+                    except Exception as e:
+                        error_string = str(e)
+                        logger.warning(
+                            f"Error on updating table schema: {error_string}",
+                            extra={"stream": stream},
+                        )
+
+                        # If the update didn't work we can either retry or delete and recreate table
+                        google_sdk_errors = getattr(e, "errors", [])
+                        if (
+                            google_sdk_errors
+                            and google_sdk_errors[0].get("reason") in RETRYABLE_ERROR_CODES
+                        ):
+                            pass
+                        elif can_delete_table and "Provided Schema does not match" in error_string:
+                            bigquery_client.delete_table(table_ref)
+                            logger.info(f"Deleted table: {table_ref}", extra={"stream": stream})
+
+                            tables[stream] = bigquery_client.create_table(
+                                bigquery.Table(
+                                    table_ref,
+                                    schema=build_schema(schemas[stream], ignore_required=True),
+                                )
+                            )
+                            logger.info(
+                                f"Created table '{tables[stream]}' schema: {tables[stream].schema}",
+                                extra={"stream": stream},
+                            )
+
+                            # Mark the table updated so we know we need to retry inserting rows
+                            updated_tables[stream] = True
+                            break
+                        else:
+                            logger.warning(
+                                f"Gave up on updating table schema with error: {error_string}",
+                                extra={"stream": stream},
+                            )
+                            break
 
         elif isinstance(msg, singer.SchemaMessage):
             stream = msg.stream
@@ -456,7 +513,9 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
             except api_core.exceptions.NotFound:
                 # This will happen on the very first run
                 tables[stream] = bigquery_client.create_table(
-                    bigquery.Table(table_ref, schema=build_schema(schemas[stream]))
+                    bigquery.Table(
+                        table_ref, schema=build_schema(schemas[stream], ignore_required=True)
+                    )
                 )
             rows[stream] = []
             errors[stream] = []
@@ -473,13 +532,15 @@ def persist_lines_hybrid(project_id, dataset_id, lines=None, validate_records=Tr
     write_rows_to_bigquery(rows.keys())
 
     if failed_lines:
-        logger.warning(f"Number of failed lines: {len(failed_lines)}")
+        logger.error(f"Number of failed lines: {len(failed_lines)}")
         # TODO: maybe also write failed_lines to special table in BigQuery
         try:
             # NOTE: if we have too many failed lines we might not be able to write the log entry
-            logger.warning(f"Failed lines: {str(failed_lines)}")
+            logger.error(f"Failed lines: {str(failed_lines)}")
         except Exception:
             pass
+
+        state = None
 
     bigquery_client.close()
 
@@ -535,6 +596,9 @@ def main():
             input,
             validate_records=validate_records,
             location=config.get("location"),
+            # NOTE: this option shouldn't be used until this BigQuery bug is fixed:
+            # https://issuetracker.google.com/issues/152476581
+            can_delete_table=config.get("delete_table_on_incompatible_schema", False),
         )
     elif config.get("stream_data", True):
         state = persist_lines_stream(
