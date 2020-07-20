@@ -41,6 +41,7 @@ SCOPES = [
 ]
 CLIENT_SECRET_FILE = "client_secret.json"
 APPLICATION_NAME = "Singer BigQuery Target"
+TABLE_CREATION_PAUSE = 30
 
 # Error reasons below from: https://cloud.google.com/bigquery/docs/error-messages#errortable
 RETRYABLE_ERROR_CODES = [
@@ -268,6 +269,8 @@ def persist_lines_stream(project_id, dataset_id, lines=None, validate_records=Tr
             errors[table] = None
             try:
                 tables[table] = bigquery_client.create_table(tables[table])
+                logger.info(f"Sleeping for {TABLE_CREATION_PAUSE} after creating a new table")
+                sleep(TABLE_CREATION_PAUSE)
             except exceptions.Conflict:
                 pass
 
@@ -492,6 +495,8 @@ def persist_lines_hybrid(
                                 f"Created table '{tables[stream]}' schema: {tables[stream].schema}",
                                 extra={"stream": stream},
                             )
+                            logger.info(f"Sleeping for {TABLE_CREATION_PAUSE} after creating a new table")
+                            sleep(TABLE_CREATION_PAUSE)
 
                             # Mark the table updated so we know we need to retry inserting rows
                             updated_tables[stream] = True
@@ -517,6 +522,9 @@ def persist_lines_hybrid(
                         table_ref, schema=build_schema(schemas[stream], ignore_required=True)
                     )
                 )
+                logger.info(f"Sleeping for {TABLE_CREATION_PAUSE} after creating a new table")
+                sleep(TABLE_CREATION_PAUSE)
+
             rows[stream] = []
             errors[stream] = []
 
